@@ -1,0 +1,13 @@
+# Ignore private inventory files
+infrastructure/inventory.ini
+
+# Ignore SSH keys
+*.pem
+*.key
+id_rsa
+id_ed25519
+
+# Ignore temporary files
+__pycache__/
+*.log
+.DS_Store
