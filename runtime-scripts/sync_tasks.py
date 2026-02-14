@@ -9,6 +9,8 @@ README_PATH = "../README.md"
 TASKS = {
     "Initial Repository Architecture": ".git",
     "Ansible Playbook: Basic System Provisioning": "infrastructure/setup.yml",
+    "Ansible Playbook: NVIDIA Container Toolkit Integration": "infrastructure/nvidia_toolkit.yml",
+    "Ansible Playbook: NVIDIA Container Toolkit Integration": "infrastructure/nvidia_toolkit.yml",
     "SSH Handshake & Remote Control": "infrastructure/inventory.ini",
 }
 
