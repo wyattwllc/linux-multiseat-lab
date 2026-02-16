@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+  steam-seat:
+    build: .
+    container_name: steamos_player2
+    privileged: true
+    shm_size: '2gb'
+    networks:
+      seat2_net: { ipv4_address: 10.0.0.51 }
+    cpuset: "${CPU_CORES:-6-11,18-23}"
+    environment:
+      - DISPLAY=:0
+      - XAUTHORITY=/home/null/.Xauthority
+      - STEAM_ARGS=-tenfoot -silent
+      - SDL_VIDEO_FULLSCREEN_DISPLAY=${RESOLVED_INDEX:-1}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=graphics,display,utility,compute
+      - PULSE_SERVER=unix:/run/pulse/native
+      # CRASH FIX: Force Proton to use specific paths if auto-discovery fails
+      - STEAM_COMPAT_DATA_PATH=/home/null/.local/share/Steam/steamapps/compatdata
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /run/user/1000/pulse/native:/run/pulse/native:ro
+      - ${XAUTHORITY:-/home/null/.Xauthority}:/home/null/.Xauthority:ro
+      
+      # --- [SHARED LIBRARY LOGIC] ---
+      # 1. BASE: Map the Host's Shared Library (Read/Write for updates)
+      - /home/null/seat2_library:/home/null/.local/share/Steam/steamapps
+      
+      # 2. OVERLAY: "Mask" the shared compatdata with a PRIVATE Seat 2 folder.
+      # This prevents Seat 2 from touching Seat 1's Proton Prefixes/Saves.
+      - /home/null/seat2_steam_home/compatdata:/home/null/.local/share/Steam/steamapps/compatdata
+      
+      # 3. OVERLAY: "Mask" the Shader Cache (Optional but recommended for Blackwell stability)
+      - /home/null/seat2_steam_home/shadercache:/home/null/.local/share/Steam/steamapps/shadercache
+
+      # --- [CONFIG ISOLATION] ---
+      - /home/null/seat2_steam_home:/home/null/.steam
+      - /home/null/Games/Manual-Entries:/home/null/Games:rw
+      
+      # --- [PROTON TOOLS] ---
+      # Allows Seat 2 to see GE-Proton/Experimental versions installed on Host
+      - /home/null/.local/share/Steam/compatibilitytools.d:/home/null/.local/share/Steam/compatibilitytools.d:ro
+
+    devices:
+      - ${RENDER_DEVICE:-/dev/dri/card1}:/dev/dri/card1
+      # The PS5 Controller (Mapped via udev or Wizard)
+      - /dev/input/seat2-controller:/dev/input/event0
+      # Dynamic Mouse/KB mapping from the Wizard (.env)
+      # If "SKIP" was selected, these will map to a safe dummy path so Docker doesn't crash.
+      - ${SEAT2_MOUSE_DEV:-/dev/input/mice}:/dev/input/mouse2
+      - ${SEAT2_KB_DEV:-/dev/input/mice}:/dev/input/event1
+      - /dev/uinput:/dev/uinput
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: cdi
+              device_ids:
+                - "://nvidia.com"
+    healthcheck:
+      test: ["CMD-SHELL", "nvidia-smi -L || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# networks:
+  seat2_net:
+    driver: macvlan
+    driver_opts: { parent: enp14s0 }
+    ipam: { config: [{ subnet: 10.0.0.0/24, gateway: 10.0.0.1 }] }
+
