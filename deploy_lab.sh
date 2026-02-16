@@ -1,6 +1,6 @@
 #!/bin/bash
 # deploy_lab.sh - Master Reset & Deployment for Linux Multiseat Lab
-# Author: Gemini (Refined for CachyOS/Docker/Macvlan)
+# Author: wyattwllc@gmail.com
 set -e
 
 # --- CONFIGURATION ---
