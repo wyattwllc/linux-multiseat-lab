@@ -11,3 +11,5 @@ id_ed25519
 __pycache__/
 *.log
 .DS_Store
+setup.conf
+.env
