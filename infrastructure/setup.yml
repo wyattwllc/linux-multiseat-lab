@@ -1,0 +1,225 @@
+---
+- name: Linux Multiseat Lab - Master CDI Build (2026 Blackwell Hardened)
+  hosts: gaming_hosts
+  become: true
+  vars:
+    target_user: "null"
+    project_path: "/home/{{ target_user }}/Desktop/linux-multiseat-lab"
+    host_interface: "enp14s0" # Verify with 'ip link' on CachyOS
+    # CCD 1 Pinning: Isolated Cores for Ryzen 9900X (Zen 5)
+    seat2_cpus: "6-11,18-23" 
+
+  tasks:
+    # 0. COLD-BOOT SERVICE VERIFICATION
+    # NOTES: This gatekeeper ensures CachyOS is fully reachable before pushing state.
+    - name: Wait for CachyOS SSH Readiness
+      wait_for:
+        port: 22
+        host: "{{ inventory_hostname }}"
+        search_regex: OpenSSH
+        delay: 5
+        timeout: 60
+      delegate_to: localhost
+      become: false
+
+    # 1. DYNAMIC HARDWARE AUDIT
+    # NOTES: Targets the primary RTX 5080 slot while ignoring iGPU/Integrated graphics.
+    - name: Detect RTX 5080 PCI Bus ID
+      shell: "lspci -nnD | grep -E 'VGA|3D' | grep -vE '8086|1002' | awk '{print $1}' | head -n 1"
+      register: dgpu_pci_id
+      changed_when: false
+
+    - name: Verify dGPU Presence
+      fail:
+        msg: "CRITICAL: RTX 5080 not detected! Check physical seating or Blackwell firmware."
+      when: dgpu_pci_id.stdout == ""
+
+    # 2. DRIVER & REPO MANAGEMENT
+    # NOTES: Blackwell (50-series) REQUIRES 'nvidia-open' modules for GSP stability.
+    - name: Remove Legacy Proprietary Drivers (Conflict Prevention)
+      community.general.pacman:
+        name: 
+          - nvidia-dkms
+          - nvidia
+        state: absent
+      ignore_errors: yes
+
+    - name: Install Blackwell-Mandatory Open Drivers & Monitoring Tools
+      community.general.pacman:
+        name: 
+          - nvidia-open-dkms        
+          - nvidia-utils
+          - nvidia-container-toolkit
+          - lib32-nvidia-utils      
+          - lib32-vulkan-icd-loader 
+          - xdotool                 
+          - docker
+          - docker-compose
+          - protontricks            
+          - xorg-server-xvfb        
+          - xorg-xhost
+          - sysstat                 # Mandatory for lab_stats.sh sidecar
+        state: present
+        update_cache: yes
+
+    # 3. OVERLAY & PERMISSION PERSISTENCE
+    # NOTES: Pre-creating folders prevents Docker from claiming them as 'root'.
+    - name: Enforce Seat 2 Directory Structure
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ target_user }}"
+        group: "{{ target_user }}"
+        mode: '0755'
+      loop:
+        - "/home/{{ target_user }}/seat2_library"
+        - "/home/{{ target_user }}/seat2_steam_home/compatdata"
+        - "/home/{{ target_user }}/seat2_steam_home/shadercache"
+        - "/home/{{ target_user }}/.local/share/Steam/compatibilitytools.d"
+        - "{{ project_path }}/scripts"
+
+    # 4. SCRIPT EXECUTION PERMISSIONS
+    # NOTES: Auto-hardens all audit, diagnostic, and handshake scripts.
+    - name: Ensure Scripts are Executable
+      file:
+        path: "{{ project_path }}/scripts/{{ item }}"
+        mode: '0755'
+        owner: "{{ target_user }}"
+      loop:
+        - verify_display_profile.sh
+        - lab_doctor.sh
+        - lab_diagnostic.sh
+        - lab_stats.sh
+        - panic_reset.sh
+        - verify_paths.sh
+
+    # 5. CRASH PREVENTION (Proton Memory Limits)
+    - name: Optimize vm.max_map_count for Proton
+      ansible.posix.sysctl:
+        name: vm.max_map_count
+        value: '2147483642'
+        state: present
+        reload: yes
+
+    # 6. SENTINEL DEPLOYMENT (Proactive Background Monitor)
+    # NOTES: Installs the Sentinel to auto-heal Blackwell stalls/CCD leaks.
+    - name: Deploy Lab Doctor Sentinel Service
+      copy:
+        dest: /etc/systemd/system/lab_monitor.service
+        content: |
+          [Unit]
+          Description=Lab Doctor Sentinel Monitor
+          After=docker.service nvidia-persistenced.service
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/bash {{ project_path }}/scripts/lab_doctor.sh
+          User=root
+          Group=root
+
+    - name: Deploy Lab Doctor Sentinel Timer
+      copy:
+        dest: /etc/systemd/system/lab_monitor.timer
+        content: |
+          [Unit]
+          Description=Run Lab Doctor Sentinel Every Minute
+          [Timer]
+          OnBootSec=2min
+          OnUnitActiveSec=1min
+          AccuracySec=1s
+          [Install]
+          WantedBy=timers.target
+
+    - name: Enable and Start Sentinel Timer
+      systemd:
+        name: lab_monitor.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    # 7. NVIDIA CDI & NETWORK SHIM
+    - name: Enable Persistence & Generate CDI
+      shell: |
+        nvidia-smi -pm 1
+        nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+        nvidia-ctk config --in-place --set nvidia-container-runtime.mode=cdi
+      changed_when: true
+
+    - name: Deploy Macvlan Shim Service
+      copy:
+        dest: /etc/systemd/system/macvlan-shim.service
+        content: |
+          [Unit]
+          Description=Macvlan Shim for Seat 2
+          After=network.target
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/bin/ip link add shim0 link {{ host_interface }} type macvlan mode bridge
+          ExecStart=/usr/bin/ip addr add 10.0.0.223/32 dev shim0
+          ExecStart=/usr/bin/ip link set shim0 up
+          ExecStart=/usr/bin/ip route add 10.0.0.51/32 dev shim0
+          RemainAfterExit=yes
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart Macvlan Shim
+
+    # 8. DOCKER-COMPOSE SYNC
+    # NOTES: Uses the PCI ID and CDI syntax verified for RTX 50-series.
+    - name: Sync Final Docker-Compose
+      copy:
+        dest: "{{ project_path }}/docker-compose.yml"
+        content: |
+          version: '3.8'
+          services:
+            steam-seat:
+              build: .
+              container_name: steamos_player2
+              privileged: true
+              shm_size: '2gb'
+              networks: { seat2_net: { ipv4_address: 10.0.0.51 } }
+              cpuset: "{{ seat2_cpus }}"
+              environment:
+                - DISPLAY=:0
+                - XAUTHORITY=/home/{{ target_user }}/.Xauthority
+                - STEAM_ARGS=-tenfoot -silent
+                - NVIDIA_VISIBLE_DEVICES=all
+                - NVIDIA_DRIVER_CAPABILITIES=graphics,display,utility,compute
+                - STEAM_COMPAT_DATA_PATH=/home/{{ target_user }}/.local/share/Steam/steamapps/compatdata
+              volumes:
+                - /tmp/.X11-unix:/tmp/.X11-unix:rw
+                - /run/user/1000/pulse/native:/run/pulse/native:ro
+                - /home/{{ target_user }}/.Xauthority:/home/{{ target_user }}/.Xauthority:ro
+                - /home/{{ target_user }}/seat2_steam_home:/home/{{ target_user }}/.steam
+                - /home/{{ target_user }}/seat2_library:/home/{{ target_user }}/.local/share/Steam/steamapps
+                - /home/{{ target_user }}/seat2_steam_home/compatdata:/home/{{ target_user }}/.local/share/Steam/steamapps/compatdata
+                - /home/{{ target_user }}/.local/share/Steam/compatibilitytools.d:/home/{{ target_user }}/.local/share/Steam/compatibilitytools.d:ro
+              devices:
+                - /dev/dri/by-path/pci-{{ dgpu_pci_id.stdout }}-card:/dev/dri/card1
+                - /dev/input/seat2-controller:/dev/input/event0
+                - /dev/uinput:/dev/uinput
+              deploy:
+                resources:
+                  reservations:
+                    devices:
+                      - driver: cdi
+                        device_ids: ["://nvidia.com"]
+          networks:
+            seat2_net:
+              driver: macvlan
+              driver_opts: { parent: {{ host_interface }} }
+              ipam: { config: [{ subnet: 10.0.0.0/24, gateway: 10.0.0.1 }] }
+        owner: "{{ target_user }}"
+
+  handlers:
+    - name: Restart Macvlan Shim
+      systemd:
+        name: macvlan-shim
+        state: restarted
+        enabled: yes
+
+  post_tasks:
+    - name: Final Build Trigger
+      shell: |
+        cd {{ project_path }}
+        docker-compose down
+        docker-compose up -d --build --force-recreate
+
